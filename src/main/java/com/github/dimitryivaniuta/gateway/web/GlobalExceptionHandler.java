@@ -1,4 +1,5 @@
-package com.github.dimitryivaniuta.gateway.proxy.web;
+package com.github.dimitryivaniuta.gateway.web;
+
 
 import com.github.dimitryivaniuta.gateway.proxy.ratelimit.RateLimitExceededException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -13,7 +14,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
 
-import static com.github.dimitryivaniuta.gateway.proxy.web.RequestContextKeys.CORRELATION_ID_MDC_KEY;
+import static com.github.dimitryivaniuta.gateway.web.RequestContextKeys.CORRELATION_ID_MDC_KEY;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
