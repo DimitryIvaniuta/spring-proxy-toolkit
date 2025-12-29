@@ -1,4 +1,4 @@
-package com.github.dimitryivaniuta.gateway.proxy.web;
+package com.github.dimitryivaniuta.gateway.web;
 
 
 public final class RequestContextKeys {
