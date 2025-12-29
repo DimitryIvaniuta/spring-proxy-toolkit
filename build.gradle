@@ -28,6 +28,17 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
 
+    // cache
+    implementation 'com.github.ben-manes.caffeine:caffeine'
+
+    // distributed rate limiting
+    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
+    implementation 'io.github.resilience4j:resilience4j-ratelimiter:2.3.0'
+    implementation 'io.github.resilience4j:resilience4j-retry:2.3.0'
+
+    // retries
+    implementation 'io.github.resilience4j:resilience4j-retry:2.3.0'
+
     runtimeOnly 'org.postgresql:postgresql'
     def lombokVersion = '1.18.42'
     compileOnly "org.projectlombok:lombok:$lombokVersion"
