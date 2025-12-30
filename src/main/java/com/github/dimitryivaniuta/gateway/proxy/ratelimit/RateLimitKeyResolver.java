@@ -22,44 +22,44 @@ public final class RateLimitKeyResolver {
         public String tag() { return tag; }
     }
 
-    public record Subject(String key, SubjectType type) {}
+    public record ResolvedClient(String clientKey, SubjectType subjectType) {}
 
-    public Subject resolve() {
+    public ResolvedClient resolve() {
         HttpServletRequest req = currentRequest().orElse(null);
-        if (req == null) return new Subject("unknown", SubjectType.UNKNOWN);
+        if (req == null) return new ResolvedClient("unknown", SubjectType.UNKNOWN);
 
         // 1) API key (best for public APIs)
         String apiKey = header(req, "X-Api-Key");
-        if (apiKey != null) return new Subject("apiKey:" + apiKey, SubjectType.API_KEY);
+        if (apiKey != null) return new ResolvedClient("apiKey:" + apiKey, SubjectType.API_KEY);
 
         // 2) Explicit user header (if your gateway/auth layer provides it)
         String userId = firstNonBlank(header(req, "X-User-Id"), header(req, "X-User"));
-        if (userId != null) return new Subject("user:" + userId, SubjectType.USER);
+        if (userId != null) return new ResolvedClient("user:" + userId, SubjectType.USER);
 
         // 3) Servlet container principal (works with basic/container auth; no Spring Security required)
         Principal p = req.getUserPrincipal();
         if (p != null && p.getName() != null && !p.getName().isBlank()) {
-            return new Subject("user:" + p.getName(), SubjectType.USER);
+            return new ResolvedClient("user:" + p.getName(), SubjectType.USER);
         }
 
         // 4) Client IP (supports reverse proxies)
         String ip = clientIp(req);
-        if (ip != null) return new Subject("ip:" + ip, SubjectType.IP);
+        if (ip != null) return new ResolvedClient("ip:" + ip, SubjectType.IP);
 
-        return new Subject("unknown", SubjectType.UNKNOWN);
+        return new ResolvedClient("unknown", SubjectType.UNKNOWN);
     }
 
     public String resolveKey() {
-        return resolve().key();
+        return resolve().clientKey();
     }
 
     public String resolveSubjectTypeTag() {
-        return resolve().type().tag();
+        return resolve().subjectType().tag();
     }
 
     private static Optional<HttpServletRequest> currentRequest() {
         var attrs = RequestContextHolder.getRequestAttributes();
-        if (attrs instanceof ServletRequestAttributes sra) return Optional.ofNullable(sra.getRequest());
+        if (attrs instanceof ServletRequestAttributes sra) return Optional.of(sra.getRequest());
         return Optional.empty();
     }
 
