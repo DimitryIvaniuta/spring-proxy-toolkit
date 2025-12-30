@@ -5,48 +5,62 @@ plugins {
 
 import org.springframework.boot.gradle.plugin.SpringBootPlugin
 
+group = 'com.github.dimitryivaniuta'
+version = '0.0.1-SNAPSHOT'
+
+java {
+    toolchain { languageVersion = JavaLanguageVersion.of(21) }
+}
+
 repositories { mavenCentral() }
 
 dependencies {
     def bootBom = platform(SpringBootPlugin.BOM_COORDINATES)
 
-    // Apply BOM to *all* configs that need version alignment
+    // Apply Spring Boot BOM broadly (keeps starters + managed libs aligned)
     implementation bootBom
     testImplementation bootBom
-    compileOnly bootBom
-    testCompileOnly bootBom
     annotationProcessor bootBom
     testAnnotationProcessor bootBom
+    compileOnly bootBom
+    testCompileOnly bootBom
 
+    // Web + JPA + AOP (ProxyFactory/Advice) + Cache + Validation
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.springframework.boot:spring-boot-starter-aop'
     implementation 'org.springframework.boot:spring-boot-starter-cache'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
-    implementation 'org.flywaydb:flyway-core'
-    implementation 'org.flywaydb:flyway-database-postgresql:11.18.0'
 
+    // Metrics
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
 
-    // cache
+    // DB migrations + driver
+    implementation 'org.flywaydb:flyway-core'
+    runtimeOnly 'org.postgresql:postgresql'
+
+    // Local cache impl
     implementation 'com.github.ben-manes.caffeine:caffeine'
 
-    // distributed rate limiting
-    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
+    // Resilience4j (local, in-service)
+    implementation 'io.github.resilience4j:resilience4j-retry:2.3.0'
     implementation 'io.github.resilience4j:resilience4j-ratelimiter:2.3.0'
-    implementation 'io.github.resilience4j:resilience4j-retry:2.3.0'
 
-    // retries
-    implementation 'io.github.resilience4j:resilience4j-retry:2.3.0'
-
-    runtimeOnly 'org.postgresql:postgresql'
+    // Lombok
     def lombokVersion = '1.18.42'
     compileOnly "org.projectlombok:lombok:$lombokVersion"
     annotationProcessor "org.projectlombok:lombok:$lombokVersion"
+    testCompileOnly "org.projectlombok:lombok:$lombokVersion"
+    testAnnotationProcessor "org.projectlombok:lombok:$lombokVersion"
 
+    // Tests
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    // integration tests with PostgreSQL containers
+    testImplementation 'org.testcontainers:junit-jupiter'
     testImplementation 'org.testcontainers:postgresql'
 }
 
-tasks.withType(Test).configureEach { useJUnitPlatform() }
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+}
