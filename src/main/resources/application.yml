@@ -1,17 +1,29 @@
+server:
+  port: 8080
+
 spring:
-  cloud:
-    gateway:
-      routes:
-        - id: backend
-          uri: http://localhost:8080
-          predicates:
-            - Path=/api/**
-          filters:
-            - name: RequestRateLimiter
-              args:
-                redis-rate-limiter.replenishRate: 50
-                redis-rate-limiter.burstCapacity: 100
-                key-resolver: "#{@principalOrIpKeyResolver}"
+  application:
+    name: proxy-toolkit
+
+  datasource:
+    url: jdbc:postgresql://localhost:5446/app
+    username: app
+    password: app
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+
+  cache:
+    type: caffeine
+
 management:
   endpoints:
     web:
@@ -20,3 +32,25 @@ management:
   endpoint:
     health:
       show-details: when_authorized
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+# matches @ConfigurationProperties(prefix="proxy-toolkit")
+proxy-toolkit:
+  enabled: true
+  max-payload-chars: 20000
+  exclude-packages:
+    - org.springframework
+    - jakarta
+    - java
+    - com.zaxxer
+
+security:
+  api-key:
+    pepper: ${API_KEY_PEPPER:}
+    hash-algorithm: SHA-256
+
+logging:
+  pattern:
+    level: "%5p [%X{correlationId:-no-corr}]"
