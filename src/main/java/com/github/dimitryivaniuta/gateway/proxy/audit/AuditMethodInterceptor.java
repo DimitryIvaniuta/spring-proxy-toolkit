@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.github.dimitryivaniuta.gateway.proxy.ProxyToolkitProperties;
 import com.github.dimitryivaniuta.gateway.proxy.annotations.ProxyAudit;
 import com.github.dimitryivaniuta.gateway.proxy.support.MethodKeySupport;
-import com.github.dimitryivaniuta.gateway.web.CorrelationIdFilter;
 import lombok.RequiredArgsConstructor;
 import org.aopalliance.intercept.MethodInterceptor;
 import org.aopalliance.intercept.MethodInvocation;
@@ -19,6 +18,8 @@ import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.lang.reflect.Method;
 import java.time.Instant;
+
+import static com.github.dimitryivaniuta.gateway.web.RequestContextKeys.CORRELATION_ID_MDC_KEY;
 
 @RequiredArgsConstructor
 public final class AuditMethodInterceptor implements MethodInterceptor {
@@ -43,7 +44,7 @@ public final class AuditMethodInterceptor implements MethodInterceptor {
 
         final long startNs = System.nanoTime();
 
-        final String correlationId = MDC.get(CorrelationIdFilter.MDC_KEY);
+        final String correlationId = MDC.get(CORRELATION_ID_MDC_KEY);
         final String traceId = MDC.get("traceId"); // optional; safe even if absent
         final String beanName = resolveBeanName(inv);
 
