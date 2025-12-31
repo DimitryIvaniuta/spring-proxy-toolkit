@@ -16,26 +16,30 @@ import java.time.Instant;
 @Table(name = "audit_call_log")
 public class AuditCallLog {
 
+    public static final String STATUS_OK = "OK";
+    public static final String STATUS_ERROR = "ERROR";
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    // timestamptz not null default now()
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
-    @Column(name = "correlation_id")
+    @Column(name = "correlation_id", length = 64)
     private String correlationId;
 
-    @Column(name = "trace_id")
+    @Column(name = "trace_id", length = 128)
     private String traceId;
 
-    @Column(name = "bean_name", nullable = false)
+    @Column(name = "bean_name", nullable = false, length = 255)
     private String beanName;
 
-    @Column(name = "target_class", nullable = false)
+    @Column(name = "target_class", nullable = false, length = 512)
     private String targetClass;
 
-    @Column(name = "method_signature", nullable = false)
+    @Column(name = "method_signature", nullable = false, length = 1024)
     private String methodSignature;
 
     @JdbcTypeCode(SqlTypes.JSON)
@@ -46,20 +50,22 @@ public class AuditCallLog {
     @Column(name = "result", columnDefinition = "jsonb")
     private String resultJson;
 
-    @Column(name = "status", nullable = false)
+    @Column(name = "status", nullable = false, length = 32)
     private String status; // OK / ERROR
 
     @Column(name = "duration_ms", nullable = false)
     private long durationMs;
 
-    @Column(name = "error_message")
+    @Column(name = "error_message", columnDefinition = "text")
     private String errorMessage;
 
-    @Column(name = "error_stack")
+    @Column(name = "error_stack", columnDefinition = "text")
     private String errorStack;
 
     @PrePersist
     void prePersist() {
-        if (createdAt == null) createdAt = Instant.now();
+        if (createdAt == null) {
+            createdAt = Instant.now();
+        }
     }
 }
