@@ -4,12 +4,14 @@ import com.github.dimitryivaniuta.gateway.proxy.annotations.ProxyRateLimit;
 import com.github.dimitryivaniuta.gateway.proxy.metrics.ProxyToolkitMetrics;
 import com.github.dimitryivaniuta.gateway.proxy.policy.ApiClientPolicy;
 import com.github.dimitryivaniuta.gateway.proxy.policy.ApiClientPolicyService;
+import com.github.dimitryivaniuta.gateway.proxy.support.MethodKeySupport;
 import io.github.resilience4j.ratelimiter.RateLimiter;
 import io.github.resilience4j.ratelimiter.RateLimiterConfig;
 import io.github.resilience4j.ratelimiter.RequestNotPermitted;
 import lombok.RequiredArgsConstructor;
 import org.aopalliance.intercept.MethodInterceptor;
 import org.aopalliance.intercept.MethodInvocation;
+import org.springframework.aop.support.AopUtils;
 import org.springframework.core.annotation.AnnotatedElementUtils;
 
 import java.lang.reflect.Method;
@@ -25,10 +27,7 @@ public final class RateLimitMethodInterceptor implements MethodInterceptor {
     private final ProxyToolkitMetrics metrics;
 
     /**
-     * Cache limiters by (methodKey + subjectType + effective policy params). DO NOT key by subjectKey
-     * to avoid unbounded growth.
-     *
-     * Primary RL is at API Gateway; backend RL should be coarse and bounded.
+     * Cache limiters by (method + subjectType + effective params). DO NOT key by subjectKey to avoid unbounded growth.
      */
     private final ConcurrentHashMap<LimiterKey, RateLimiter> limiterCache = new ConcurrentHashMap<>();
 
@@ -37,32 +36,33 @@ public final class RateLimitMethodInterceptor implements MethodInterceptor {
         ProxyRateLimit cfg = find(inv.getThis().getClass(), inv.getMethod());
         if (cfg == null) return inv.proceed();
 
-        final String methodKey = methodKey(inv);
+        Class<?> targetClass = resolveTargetClass(inv);
+        String fullMethodKey = MethodKeySupport.signature(targetClass, inv.getMethod());
+        String metricMethodKey = MethodKeySupport.metricMethodKey(targetClass, inv.getMethod());
 
-        final RateLimitKeyResolver.ResolvedClient subject = keyResolver.resolve();
-        final String subjectType = subject.subjectType().tag();
-        final String subjectKey = safeSubjectKey(subject); // used ONLY for policy lookup
+        RateLimitKeyResolver.ResolvedClient subject = keyResolver.resolve();
+        String subjectType = subject.subjectType().tag();
 
-        final ApiClientPolicy policy = (subjectKey == null)
-                ? null
-                : policyService.find(subjectKey, methodKey).orElse(null);
-
-        // If explicitly disabled for this client+method => skip backend RL (gateway is primary anyway).
+        ApiClientPolicy policy = policyService.find(subject.subjectKey(), fullMethodKey).orElse(null);
         if (policy != null && !policy.isEnabled()) {
             return inv.proceed();
         }
 
-        // Effective params: policy override -> annotation -> clamp
-        final int effPps = clamp(policy != null ? policy.getRlPermitsPerSec() : null, cfg.permitsPerSecond(), 1, 100_000);
-        final int effBurst = clamp(policy != null ? policy.getRlBurst() : null, cfg.burst(), 0, 100_000);
+        int pps = (policy != null && policy.getRlPermitsPerSec() != null)
+                ? MethodKeySupport.clampInt(policy.getRlPermitsPerSec(), cfg.permitsPerSecond(), 1, 100_000)
+                : Math.max(1, cfg.permitsPerSecond());
 
-        // Resilience4j doesn't have a real "burst bucket". We approximate by raising limitForPeriod.
-        final int limitForPeriod = (effBurst > 0) ? Math.max(effPps, effBurst) : effPps;
-        final Duration refreshPeriod = Duration.ofSeconds(1);
-        final Duration timeout = Duration.ZERO; // fail fast for HTTP
+        int burst = (policy != null && policy.getRlBurst() != null)
+                ? MethodKeySupport.clampInt(policy.getRlBurst(), cfg.burst(), 0, 100_000)
+                : Math.max(0, cfg.burst());
 
-        final LimiterKey lk = LimiterKey.of(methodKey, subjectType, limitForPeriod, refreshPeriod, timeout);
-        final RateLimiter limiter = limiterCache.computeIfAbsent(
+        // Resilience4j doesn't have true burst buckets; approximate by raising limitForPeriod.
+        int limitForPeriod = (burst > 0) ? Math.max(pps, burst) : pps;
+        Duration refreshPeriod = Duration.ofSeconds(1);
+        Duration timeout = Duration.ZERO; // fail fast
+
+        LimiterKey lk = LimiterKey.of(metricMethodKey, subjectType, limitForPeriod, refreshPeriod, timeout);
+        RateLimiter limiter = limiterCache.computeIfAbsent(
                 lk,
                 k -> buildLimiter(k.name(), limitForPeriod, refreshPeriod, timeout)
         );
@@ -73,24 +73,24 @@ public final class RateLimitMethodInterceptor implements MethodInterceptor {
             return RateLimiter.decorateCheckedSupplier(limiter, inv::proceed).get();
         } catch (RequestNotPermitted ex) {
             rejected = true;
-            long retryAfterSeconds = retryAfterSeconds(refreshPeriod);
-            metrics.rateLimitRejected(methodKey, subjectType);
-            throw new RateLimitExceededException("Rate limit exceeded", retryAfterSeconds);
+            metrics.rateLimitRejected(metricMethodKey, subjectType);
+            throw new RateLimitExceededException("Rate limit exceeded", retryAfterSeconds(refreshPeriod));
         } finally {
-            // If not rejected, it's allowed (even if proceed() throws business exception).
             if (!rejected) {
-                metrics.rateLimitAllowed(methodKey, subjectType);
+                metrics.rateLimitAllowed(metricMethodKey, subjectType);
             }
         }
+    }
+
+    private static Class<?> resolveTargetClass(MethodInvocation inv) {
+        Object t = inv.getThis();
+        Class<?> c = (t != null) ? AopUtils.getTargetClass(t) : null;
+        return (c != null) ? c : inv.getMethod().getDeclaringClass();
     }
 
     private static ProxyRateLimit find(Class<?> cls, Method m) {
         ProxyRateLimit onMethod = AnnotatedElementUtils.findMergedAnnotation(m, ProxyRateLimit.class);
         return (onMethod != null) ? onMethod : AnnotatedElementUtils.findMergedAnnotation(cls, ProxyRateLimit.class);
-    }
-
-    private static String methodKey(MethodInvocation inv) {
-        return inv.getThis().getClass().getName() + "#" + inv.getMethod().getName();
     }
 
     private static RateLimiter buildLimiter(String name, int limitForPeriod, Duration refreshPeriod, Duration timeout) {
@@ -105,25 +105,6 @@ public final class RateLimitMethodInterceptor implements MethodInterceptor {
     private static long retryAfterSeconds(Duration refreshPeriod) {
         long s = refreshPeriod.toSeconds();
         return (s <= 0) ? 1L : s;
-    }
-
-    private static int clamp(Integer override, int fallback, int min, int max) {
-        int v = (override != null) ? override : fallback;
-        if (v < min) return min;
-        return Math.min(v, max);
-    }
-
-    /**
-     * Your ResolvedClient likely has a "subjectKey" (apiKey:..., user:..., ip:...).
-     * If your method name differs (e.g. key(), clientKey()), update ONLY this method.
-     */
-    private static String safeSubjectKey(RateLimitKeyResolver.ResolvedClient subject) {
-        try {
-            // expected: subject.subjectKey()
-            return (String) subject.getClass().getMethod("subjectKey").invoke(subject);
-        } catch (Exception ignored) {
-            return null; // no subjectKey available -> no policy lookup
-        }
     }
 
     private record LimiterKey(
@@ -144,13 +125,19 @@ public final class RateLimitMethodInterceptor implements MethodInterceptor {
 
         @Override
         public boolean equals(Object o) {
-            if (this == o) return true;
-            if (!(o instanceof LimiterKey that)) return false;
-            return limitForPeriod == that.limitForPeriod
-                    && Objects.equals(methodKey, that.methodKey)
-                    && Objects.equals(subjectType, that.subjectType)
-                    && Objects.equals(refreshPeriod, that.refreshPeriod)
-                    && Objects.equals(timeout, that.timeout);
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof LimiterKey(
+                    String key, String type, int forPeriod, Duration period, Duration timeout1
+            ))) {
+                return false;
+            }
+            return limitForPeriod == forPeriod
+                    && Objects.equals(methodKey, key)
+                    && Objects.equals(subjectType, type)
+                    && Objects.equals(refreshPeriod, period)
+                    && Objects.equals(timeout, timeout1);
         }
 
         @Override

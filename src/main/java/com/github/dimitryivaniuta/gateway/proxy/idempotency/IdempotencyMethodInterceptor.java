@@ -23,6 +23,8 @@ import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.Optional;
 
+import static com.github.dimitryivaniuta.gateway.web.RequestContextKeys.CORRELATION_ID_MDC_KEY;
+
 @RequiredArgsConstructor
 public class IdempotencyMethodInterceptor implements MethodInterceptor {
 
@@ -41,7 +43,7 @@ public class IdempotencyMethodInterceptor implements MethodInterceptor {
         ProxyIdempotent ann = find(inv.getThis().getClass(), inv.getMethod());
         if (ann == null || !ann.enabled()) return inv.proceed();
 
-        String idemKey = MDC.get(IdempotencyKeyFilter.MDC_KEY);
+        String idemKey = MDC.get(CORRELATION_ID_MDC_KEY);
         if (idemKey == null || idemKey.isBlank()) {
             if (ann.requireKey()) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Missing X-Idempotency-Key");
@@ -71,7 +73,7 @@ public class IdempotencyMethodInterceptor implements MethodInterceptor {
         // Request hash must be stable; store minimal but deterministic hash
         String requestHash = sha256(safeArgsJson(inv.getArguments()));
 
-        String lockOwner = Optional.ofNullable(MDC.get(CorrelationIdFilter.MDC_KEY)).orElse("no-correlation");
+        String lockOwner = Optional.ofNullable(MDC.get(CORRELATION_ID_MDC_KEY)).orElse("no-correlation");
 
         IdempotencyRecord rec = service.acquireOrGet(idemKey, fullMethodKey, requestHash, ttl, lockOwner);
 
