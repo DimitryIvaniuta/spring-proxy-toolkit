@@ -18,9 +18,12 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Predicate;
 
 public class RetryMethodInterceptor implements MethodInterceptor {
+
+    private static final double DEFAULT_JITTER_FACTOR = 0.20d; // +/-20%
 
     private final ConcurrentHashMap<RetryKey, Retry> retryCache = new ConcurrentHashMap<>();
 
@@ -63,12 +66,10 @@ public class RetryMethodInterceptor implements MethodInterceptor {
         Retry retry = retryCache.computeIfAbsent(key, k -> buildRetry(k, ann, maxAttempts, backoffMs));
 
         metrics.retryCall(metricMethodKey);
-        final int[] attempt = {0};
         long start = System.nanoTime();
 
         try {
             return Retry.decorateCheckedSupplier(retry, () -> {
-                attempt[0]++;
                 metrics.retryAttempt(metricMethodKey);
                 return inv.proceed();
             }).get();
@@ -84,9 +85,13 @@ public class RetryMethodInterceptor implements MethodInterceptor {
         Predicate<Throwable> retryOn = ex ->
                 Arrays.stream(ann.retryOn()).anyMatch(c -> c.isInstance(ex));
 
-        IntervalFunction interval = (backoffMs <= 0)
-                ? IntervalFunction.ofDefaults()
-                : IntervalFunction.ofExponentialBackoff(Duration.ofMillis(backoffMs), 2.0).withJitter(0.2);
+        IntervalFunction interval;
+        if (backoffMs <= 0) {
+            interval = IntervalFunction.ofDefaults();
+        } else {
+            IntervalFunction base = IntervalFunction.ofExponentialBackoff(Duration.ofMillis(backoffMs), 2.0);
+            interval = withJitter(base, DEFAULT_JITTER_FACTOR);
+        }
 
         RetryConfig config = RetryConfig.custom()
                 .maxAttempts(maxAttempts)
@@ -96,6 +101,24 @@ public class RetryMethodInterceptor implements MethodInterceptor {
                 .build();
 
         return Retry.of("retry:" + key.methodKey, config);
+    }
+
+    /**
+     * Adds random jitter to spread retry bursts: interval * U(1-factor, 1+factor).
+     * Keeps result >= 0.
+     */
+    private static IntervalFunction withJitter(IntervalFunction base, double factor) {
+        final double f = Math.max(0d, Math.min(1d, factor));
+
+        return attempt -> {
+            Long baseMsObj = base.apply(attempt);
+            long baseMs = (baseMsObj == null) ? 0L : baseMsObj;
+            if (baseMs <= 0L || f == 0d) return Math.max(0L, baseMs);
+
+            double mult = ThreadLocalRandom.current().nextDouble(1d - f, 1d + f);
+            long out = (long) Math.floor(baseMs * mult);
+            return Math.max(0L, out);
+        };
     }
 
     private static ProxyRetry find(Class<?> cls, Method m) {
@@ -117,7 +140,11 @@ public class RetryMethodInterceptor implements MethodInterceptor {
         }
 
         static RetryKey of(String methodKey, int maxAttempts, int backoffMs, Class<? extends Throwable>[] retryOn) {
-            String sig = Arrays.stream(retryOn).map(Class::getName).sorted().reduce((a,b)->a+"|"+b).orElse("");
+            String sig = Arrays.stream(retryOn)
+                    .map(Class::getName)
+                    .sorted()
+                    .reduce((a, b) -> a + "|" + b)
+                    .orElse("");
             return new RetryKey(methodKey, maxAttempts, backoffMs, sig);
         }
 
@@ -128,6 +155,9 @@ public class RetryMethodInterceptor implements MethodInterceptor {
                     && Objects.equals(methodKey, k.methodKey)
                     && Objects.equals(retryOnSig, k.retryOnSig);
         }
-        @Override public int hashCode() { return Objects.hash(methodKey, maxAttempts, backoffMs, retryOnSig); }
+
+        @Override public int hashCode() {
+            return Objects.hash(methodKey, maxAttempts, backoffMs, retryOnSig);
+        }
     }
 }
