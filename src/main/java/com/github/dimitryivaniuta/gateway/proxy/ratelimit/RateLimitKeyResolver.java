@@ -1,5 +1,7 @@
 package com.github.dimitryivaniuta.gateway.proxy.ratelimit;
 
+import com.github.dimitryivaniuta.gateway.proxy.client.ApiClientCredentialLookupService;
+import com.github.dimitryivaniuta.gateway.proxy.client.ApiKeyHashService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.stereotype.Component;
 import org.springframework.web.context.request.RequestContextHolder;
@@ -22,45 +24,57 @@ public final class RateLimitKeyResolver {
         public String tag() { return tag; }
     }
 
-    public record ResolvedClient(String clientKey, SubjectType subjectType) {}
+    /**
+     * subjectKey format is stable and used in:
+     * - rate limit bucket keys
+     * - api_client_policy.client_key
+     *
+     * Examples:
+     * - apiKey:<hash>
+     * - user:<username>
+     * - ip:<address>
+     */
+    public record ResolvedClient(SubjectType subjectType, String subjectKey, boolean knownApiKey) {}
+
+    private final ApiKeyHashService hashService;
+    private final ApiClientCredentialLookupService credentialLookup;
+
+    public RateLimitKeyResolver(ApiKeyHashService hashService,
+                                ApiClientCredentialLookupService credentialLookup) {
+        this.hashService = hashService;
+        this.credentialLookup = credentialLookup;
+    }
 
     public ResolvedClient resolve() {
         HttpServletRequest req = currentRequest().orElse(null);
-        if (req == null) return new ResolvedClient("unknown", SubjectType.UNKNOWN);
+        if (req == null) return new ResolvedClient(SubjectType.UNKNOWN, "unknown", false);
 
-        // 1) API key (best for public APIs)
-        String apiKey = header(req, "X-Api-Key");
-        if (apiKey != null) return new ResolvedClient("apiKey:" + apiKey, SubjectType.API_KEY);
-
-        // 2) Explicit user header (if your gateway/auth layer provides it)
-        String userId = firstNonBlank(header(req, "X-User-Id"), header(req, "X-User"));
-        if (userId != null) return new ResolvedClient("user:" + userId, SubjectType.USER);
-
-        // 3) Servlet container principal (works with basic/container auth; no Spring Security required)
-        Principal p = req.getUserPrincipal();
-        if (p != null && p.getName() != null && !p.getName().isBlank()) {
-            return new ResolvedClient("user:" + p.getName(), SubjectType.USER);
+        // 1) API key (preferred)
+        String rawApiKey = header(req, "X-Api-Key");
+        if (rawApiKey != null && !rawApiKey.isBlank()) {
+            String hash = hashService.hash(rawApiKey);
+            boolean known = credentialLookup.findActiveByHash(hash).isPresent();
+            return new ResolvedClient(SubjectType.API_KEY, "apiKey:" + hash, known);
         }
 
-        // 4) Client IP (supports reverse proxies)
-        String ip = clientIp(req);
-        if (ip != null) return new ResolvedClient("ip:" + ip, SubjectType.IP);
+        // 2) Authenticated user (if you have security enabled)
+        Principal p = req.getUserPrincipal();
+        if (p != null && p.getName() != null && !p.getName().isBlank()) {
+            return new ResolvedClient(SubjectType.USER, "user:" + p.getName(), false);
+        }
 
-        return new ResolvedClient("unknown", SubjectType.UNKNOWN);
-    }
+        // 3) IP fallback
+        String ip = resolveClientIp(req);
+        if (ip != null && !ip.isBlank()) {
+            return new ResolvedClient(SubjectType.IP, "ip:" + ip, false);
+        }
 
-    public String resolveKey() {
-        return resolve().clientKey();
-    }
-
-    public String resolveSubjectTypeTag() {
-        return resolve().subjectType().tag();
+        return new ResolvedClient(SubjectType.UNKNOWN, "unknown", false);
     }
 
     private static Optional<HttpServletRequest> currentRequest() {
-        var attrs = RequestContextHolder.getRequestAttributes();
-        if (attrs instanceof ServletRequestAttributes sra) return Optional.of(sra.getRequest());
-        return Optional.empty();
+        if (!(RequestContextHolder.getRequestAttributes() instanceof ServletRequestAttributes a)) return Optional.empty();
+        return Optional.ofNullable(a.getRequest());
     }
 
     private static String header(HttpServletRequest req, String name) {
@@ -68,13 +82,7 @@ public final class RateLimitKeyResolver {
         return (v == null || v.isBlank()) ? null : v.trim();
     }
 
-    private static String firstNonBlank(String a, String b) {
-        if (a != null && !a.isBlank()) return a;
-        if (b != null && !b.isBlank()) return b;
-        return null;
-    }
-
-    private static String clientIp(HttpServletRequest req) {
+    private static String resolveClientIp(HttpServletRequest req) {
         // X-Forwarded-For may contain "client, proxy1, proxy2"
         String xff = header(req, "X-Forwarded-For");
         if (xff != null) {
