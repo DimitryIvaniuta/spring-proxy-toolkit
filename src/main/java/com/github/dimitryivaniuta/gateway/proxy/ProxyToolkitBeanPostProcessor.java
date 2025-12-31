@@ -7,6 +7,7 @@ import com.github.dimitryivaniuta.gateway.proxy.cache.CacheMethodInterceptor;
 import com.github.dimitryivaniuta.gateway.proxy.idempotency.IdempotencyMethodInterceptor;
 import com.github.dimitryivaniuta.gateway.proxy.idempotency.IdempotencyService;
 import com.github.dimitryivaniuta.gateway.proxy.metrics.ProxyToolkitMetrics;
+import com.github.dimitryivaniuta.gateway.proxy.policy.ApiClientPolicyService;
 import com.github.dimitryivaniuta.gateway.proxy.ratelimit.RateLimitKeyResolver;
 import com.github.dimitryivaniuta.gateway.proxy.ratelimit.RateLimitMethodInterceptor;
 import com.github.dimitryivaniuta.gateway.proxy.retry.RetryMethodInterceptor;
@@ -18,7 +19,6 @@ import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.cache.CacheManager;
 import org.springframework.core.Ordered;
-import org.springframework.core.annotation.AnnotatedElementUtils;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 import org.springframework.util.ClassUtils;
@@ -56,6 +56,8 @@ public final class ProxyToolkitBeanPostProcessor implements BeanPostProcessor {
     private final IdempotencyService idempotencyService;
 
     private final RateLimitKeyResolver rateLimitKeyResolver;
+    private final ApiClientPolicyService apiClientPolicyService;
+
     private final ProxyToolkitMetrics metrics;
 
     @Override
@@ -67,29 +69,28 @@ public final class ProxyToolkitBeanPostProcessor implements BeanPostProcessor {
         if (!needsProxy(targetClass)) return bean;
 
         // Build advices once per bean
-        var audit = new AuditMethodInterceptor(
-                beanName, targetClass, auditService, objectMapper, props.getMaxPayloadChars()
-        );
+        var audit = new AuditMethodInterceptor(auditService, objectMapper, props);
 
         // NOTE: ensure your IdempotencyMethodInterceptor constructor matches
         // (recommended signature: (IdempotencyService, ObjectMapper, ProxyToolkitMetrics))
-        var idem = new IdempotencyMethodInterceptor(idempotencyService, objectMapper, metrics);
+        var idem = new IdempotencyMethodInterceptor(idempotencyService, objectMapper, rateLimitKeyResolver, apiClientPolicyService, metrics);
 
         // NOTE: ensure your CacheMethodInterceptor constructor matches
         // (recommended signature: (CacheManager, RateLimitKeyResolver, ProxyToolkitMetrics))
-        var cache = new CacheMethodInterceptor(cacheManager, rateLimitKeyResolver, metrics);
+        var cache = new CacheMethodInterceptor(cacheManager, rateLimitKeyResolver, apiClientPolicyService, metrics);
 
-        var rateLimit = new RateLimitMethodInterceptor(rateLimitKeyResolver, metrics);
-        var retry = new RetryMethodInterceptor(metrics);
+        var rateLimit = new RateLimitMethodInterceptor(rateLimitKeyResolver, apiClientPolicyService, metrics);
+
+        var retry = new RetryMethodInterceptor(rateLimitKeyResolver, apiClientPolicyService, metrics);
 
         // If already proxied (e.g., @Transactional), add advice to existing proxy
         if (bean instanceof Advised advised) {
-            // add in deterministic order at the beginning of chain
+            // add at index 0 in reverse order to preserve final outer->inner chain
+            advised.addAdvice(0, retry);
+            advised.addAdvice(0, rateLimit);
+            advised.addAdvice(0, cache);
+            advised.addAdvice(0, idem);
             advised.addAdvice(0, audit);
-            advised.addAdvice(1, idem);
-            advised.addAdvice(2, cache);
-            advised.addAdvice(3, rateLimit);
-            advised.addAdvice(4, retry);
             return bean;
         }
 
@@ -117,12 +118,7 @@ public final class ProxyToolkitBeanPostProcessor implements BeanPostProcessor {
     private boolean isExcluded(Class<?> targetClass) {
         String name = targetClass.getName();
 
-        // Fast path: always exclude common infra
-        if (name.startsWith("org.springframework.") ||
-                name.startsWith("jakarta.") ||
-                name.startsWith("java.") ||
-                name.startsWith("kotlin.") ||
-                name.startsWith("com.zaxxer.")) {
+        if (name.startsWith("org.springframework.") || name.startsWith("jakarta.") || name.startsWith("java.") || name.startsWith("kotlin.") || name.startsWith("com.zaxxer.")) {
             return true;
         }
 
