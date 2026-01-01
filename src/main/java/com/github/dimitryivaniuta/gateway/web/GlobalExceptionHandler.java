@@ -3,6 +3,7 @@ package com.github.dimitryivaniuta.gateway.web;
 
 import com.github.dimitryivaniuta.gateway.proxy.ratelimit.RateLimitExceededException;
 import jakarta.servlet.http.HttpServletRequest;
+import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -16,6 +17,7 @@ import java.time.Instant;
 
 import static com.github.dimitryivaniuta.gateway.web.RequestContextKeys.CORRELATION_ID_MDC_KEY;
 
+@Slf4j
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
@@ -50,6 +52,7 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiError> handleGeneric(Exception ex, HttpServletRequest req) {
+        log.error("Unhandled exception", ex);
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(error(HttpStatus.INTERNAL_SERVER_ERROR, "Unexpected error", req));
     }
