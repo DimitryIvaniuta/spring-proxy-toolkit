@@ -13,6 +13,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import java.io.IOException;
 
 /**
+ * Extracts idempotency key header and stores it in MDC for IdempotencyMethodInterceptor.
  * Extracts X-Idempotency-Key from request and stores it in MDC for downstream usage:
  * - IdempotencyMethodInterceptor reads it from MDC to enforce idempotency.
  *
@@ -25,18 +26,33 @@ import java.io.IOException;
 public class IdempotencyKeyFilter extends OncePerRequestFilter {
 
     public static final String HEADER = "X-Idempotency-Key";
+    public static final String ALT_HEADER = "Idempotency-Key"; // optional compatibility
     public static final String MDC_KEY = "idempotencyKey";
+
+    private static final int MAX_LEN = 128;
+
+    @Override
+    protected boolean shouldNotFilter(HttpServletRequest request) {
+        String p = request.getRequestURI();
+        return p != null && (p.startsWith("/actuator") || p.startsWith("/swagger") || p.startsWith("/v3/api-docs"));
+    }
 
     @Override
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
 
-        String key = header(request, HEADER);
+        String key = firstHeader(request, HEADER, ALT_HEADER);
 
-        // Optional: basic sanitation (no whitespace-only keys)
-        if (key != null && !key.isBlank()) {
-            MDC.put(MDC_KEY, key);
+        if (key != null) {
+            key = key.trim();
+            // no whitespace-only keys
+            if (!key.isEmpty()) {
+                if (key.length() > MAX_LEN) {
+                    key = key.substring(0, MAX_LEN);
+                }
+                MDC.put(MDC_KEY, key);
+            }
         }
 
         try {
@@ -46,10 +62,11 @@ public class IdempotencyKeyFilter extends OncePerRequestFilter {
         }
     }
 
-    private static String header(HttpServletRequest req, String name) {
-        String v = req.getHeader(name);
-        if (v == null) return null;
-        v = v.trim();
-        return v.isEmpty() ? null : v;
+    private static String firstHeader(HttpServletRequest req, String... names) {
+        for (String n : names) {
+            String v = req.getHeader(n);
+            if (v != null && !v.isBlank()) return v;
+        }
+        return null;
     }
 }
