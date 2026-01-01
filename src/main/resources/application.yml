@@ -52,5 +52,16 @@ security:
     hash-algorithm: SHA-256
 
 logging:
+  level:
+    root: INFO
+    com.github.dimitryivaniuta: DEBUG
+    org.springframework.cache: DEBUG
+    org.springframework.web: INFO
+    org.springframework.boot.autoconfigure: INFO
+
+    # only enable when debugging DB issues
+    org.hibernate.SQL: WARN
+    org.hibernate.type.descriptor.sql.BasicBinder: WARN
+
   pattern:
-    level: "%5p [%X{correlationId:-no-corr}]"
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n%wEx"
