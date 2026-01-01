@@ -11,8 +11,10 @@ import com.github.dimitryivaniuta.gateway.proxy.support.MethodKeySupport;
 import com.github.dimitryivaniuta.gateway.web.CorrelationIdFilter;
 import com.github.dimitryivaniuta.gateway.web.IdempotencyKeyFilter;
 import lombok.RequiredArgsConstructor;
-import org.aopalliance.intercept.*;
+import org.aopalliance.intercept.MethodInterceptor;
+import org.aopalliance.intercept.MethodInvocation;
 import org.slf4j.MDC;
+import org.springframework.aop.support.AopUtils;
 import org.springframework.core.annotation.AnnotatedElementUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
@@ -22,8 +24,6 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.Optional;
-
-import static com.github.dimitryivaniuta.gateway.web.RequestContextKeys.CORRELATION_ID_MDC_KEY;
 
 @RequiredArgsConstructor
 public class IdempotencyMethodInterceptor implements MethodInterceptor {
@@ -40,10 +40,14 @@ public class IdempotencyMethodInterceptor implements MethodInterceptor {
 
     @Override
     public Object invoke(MethodInvocation inv) throws Throwable {
-        ProxyIdempotent ann = find(inv.getThis().getClass(), inv.getMethod());
+        Class<?> targetClass = resolveTargetClass(inv);
+        Method specificMethod = AopUtils.getMostSpecificMethod(inv.getMethod(), targetClass);
+
+        ProxyIdempotent ann = find(targetClass, specificMethod);
         if (ann == null || !ann.enabled()) return inv.proceed();
 
-        String idemKey = MDC.get(CORRELATION_ID_MDC_KEY);
+        // must come from IdempotencyKeyFilter (X-Idempotency-Key)
+        String idemKey = MDC.get(IdempotencyKeyFilter.MDC_KEY);
         if (idemKey == null || idemKey.isBlank()) {
             if (ann.requireKey()) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Missing X-Idempotency-Key");
@@ -51,8 +55,8 @@ public class IdempotencyMethodInterceptor implements MethodInterceptor {
             return inv.proceed();
         }
 
-        String fullMethodKey = MethodKeySupport.signature(inv.getThis().getClass(), inv.getMethod());
-        String metricMethodKey = MethodKeySupport.metricMethodKey(inv.getThis().getClass(), inv.getMethod());
+        String fullMethodKey = MethodKeySupport.signature(targetClass, specificMethod);
+        String metricMethodKey = MethodKeySupport.metricMethodKey(targetClass, specificMethod);
 
         // Policy lookup by subjectKey (apiKey:<hash> / user:<name> / ip:<addr>)
         RateLimitKeyResolver.ResolvedClient client = keyResolver.resolve();
@@ -62,9 +66,7 @@ public class IdempotencyMethodInterceptor implements MethodInterceptor {
         if (policy != null && !policy.isEnabled()) return inv.proceed();
 
         Integer ttlOverride = (policy != null) ? policy.getIdempotencyTtlSeconds() : null;
-        if (ttlOverride != null && ttlOverride <= 0) {
-            return inv.proceed(); // explicitly disabled
-        }
+        if (ttlOverride != null && ttlOverride <= 0) return inv.proceed();
 
         Duration ttl = (ttlOverride != null)
                 ? Duration.ofSeconds(MethodKeySupport.clampInt(ttlOverride, (int) ann.ttlSeconds(), 60, 7 * 24 * 3600))
@@ -73,7 +75,8 @@ public class IdempotencyMethodInterceptor implements MethodInterceptor {
         // Request hash must be stable; store minimal but deterministic hash
         String requestHash = sha256(safeArgsJson(inv.getArguments()));
 
-        String lockOwner = Optional.ofNullable(MDC.get(CORRELATION_ID_MDC_KEY)).orElse("no-correlation");
+        // lock owner should be correlation id (not idempotency key)
+        String lockOwner = Optional.ofNullable(MDC.get(CorrelationIdFilter.MDC_KEY)).orElse("no-correlation");
 
         IdempotencyRecord rec = service.acquireOrGet(idemKey, fullMethodKey, requestHash, ttl, lockOwner);
 
@@ -118,12 +121,11 @@ public class IdempotencyMethodInterceptor implements MethodInterceptor {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Request with this idempotency key is already in progress");
         }
 
-        // We execute business logic (owner or rejectInFlight=false)
         metrics.idempotencyExecuted(metricMethodKey);
 
         try {
             Object result = inv.proceed();
-            String responseJson = (inv.getMethod().getReturnType() == void.class) ? null : safeResultJson(result);
+            String responseJson = (specificMethod.getReturnType() == void.class) ? null : safeResultJson(result);
             service.markCompleted(idemKey, fullMethodKey, requestHash, responseJson);
             return result;
         } catch (Throwable ex) {
@@ -137,20 +139,25 @@ public class IdempotencyMethodInterceptor implements MethodInterceptor {
         return onMethod != null ? onMethod : AnnotatedElementUtils.findMergedAnnotation(cls, ProxyIdempotent.class);
     }
 
-    private Object readStoredResult(MethodInvocation inv, IdempotencyRecord rec) throws Exception {
+    private Object readStoredResult(MethodInvocation inv, IdempotencyRecord rec) {
         if (inv.getMethod().getReturnType() == void.class) return null;
         String json = rec.getResponseJson();
         if (json == null || json.isBlank()) return null;
 
-        JavaType type = mapper.getTypeFactory().constructType(inv.getMethod().getGenericReturnType());
-        return mapper.readValue(json, type);
+        try {
+            JavaType type = mapper.getTypeFactory().constructType(inv.getMethod().getGenericReturnType());
+            return mapper.readValue(json, type);
+        } catch (Exception e) {
+            // if cannot deserialize, fall back to executing (or raise)
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Stored idempotent response cannot be deserialized");
+        }
     }
 
     private String safeArgsJson(Object[] args) {
         try {
             return mapper.writeValueAsString(args);
         } catch (Exception e) {
-            return "\"<args-serialization-error>\"";
+            return "[]";
         }
     }
 
@@ -158,19 +165,25 @@ public class IdempotencyMethodInterceptor implements MethodInterceptor {
         try {
             return mapper.writeValueAsString(result);
         } catch (Exception e) {
-            return "\"<result-serialization-error>\"";
+            return "\"<json-serialization-error>\"";
         }
     }
 
-    private static String sha256(String s) {
+    private static String sha256(String in) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] b = md.digest(s.getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder(b.length * 2);
-            for (byte x : b) sb.append(String.format("%02x", x));
+            byte[] dig = md.digest(in.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(dig.length * 2);
+            for (byte b : dig) sb.append(String.format("%02x", b));
             return sb.toString();
         } catch (Exception e) {
-            throw new IllegalStateException(e);
+            return "sha256-error";
         }
+    }
+
+    private static Class<?> resolveTargetClass(MethodInvocation inv) {
+        Object t = inv.getThis();
+        Class<?> c = (t != null) ? AopUtils.getTargetClass(t) : null;
+        return (c != null) ? c : inv.getMethod().getDeclaringClass();
     }
 }
