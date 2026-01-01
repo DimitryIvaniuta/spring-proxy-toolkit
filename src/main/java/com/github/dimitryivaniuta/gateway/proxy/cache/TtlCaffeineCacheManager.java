@@ -6,8 +6,12 @@ import org.springframework.cache.caffeine.CaffeineCache;
 import org.springframework.cache.support.AbstractCacheManager;
 
 import java.time.Duration;
-import java.util.*;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -17,13 +21,15 @@ import java.util.regex.Pattern;
  *   "ordersByCustomer:ttl=30"   -> expireAfterWrite 30 seconds
  *   "apiKeyLookup:ttl=60"       -> expireAfterWrite 60 seconds
  *   "apiClientPolicy:ttl=30"    -> expireAfterWrite 30 seconds
- *
  * If ":ttl=" is not present or invalid, it falls back to the base builder's configuration.
  *
  * Notes:
  * - This manager is intentionally local/in-memory (no Redis) for this project setup.
  * - We cache missing caches in a ConcurrentHashMap and return stable Cache instances.
  * - TTL is parsed and clamped to avoid accidental huge values.
+ * IMPORTANT:
+ * Caffeine builders are mutable. You MUST create a fresh builder per cache.
+ * This manager therefore uses a Supplier<Caffeine<..>> factory.
  */
 public final class TtlCaffeineCacheManager extends AbstractCacheManager {
 
@@ -31,11 +37,11 @@ public final class TtlCaffeineCacheManager extends AbstractCacheManager {
     private static final long MIN_TTL_SECONDS = 1;
     private static final long MAX_TTL_SECONDS = 24 * 60 * 60; // 24h safety cap
 
-    private final Caffeine<Object, Object> baseBuilder;
+    private final Supplier<Caffeine<Object, Object>> baseBuilderFactory;
     private final Map<String, Cache> cacheMap = new ConcurrentHashMap<>();
 
-    public TtlCaffeineCacheManager(Caffeine<Object, Object> baseBuilder) {
-        this.baseBuilder = Objects.requireNonNull(baseBuilder, "baseBuilder must not be null");
+    public TtlCaffeineCacheManager(Supplier<Caffeine<Object, Object>> baseBuilderFactory) {
+        this.baseBuilderFactory = Objects.requireNonNull(baseBuilderFactory, "baseBuilderFactory must not be null");
     }
 
     @Override
@@ -46,20 +52,20 @@ public final class TtlCaffeineCacheManager extends AbstractCacheManager {
 
     @Override
     protected Cache getMissingCache(String name) {
-        // Ensure only one cache instance is created per name.
         return cacheMap.computeIfAbsent(name, this::createCache);
     }
 
     private Cache createCache(String name) {
         Parsed parsed = parse(name);
 
-        Caffeine<Object, Object> builder = baseBuilder;
+        // CRITICAL: fresh builder per cache (prevents "expireAfterWrite already set")
+        Caffeine<Object, Object> builder = baseBuilderFactory.get();
+
         if (parsed.ttlSeconds != null) {
             builder = builder.expireAfterWrite(Duration.ofSeconds(parsed.ttlSeconds));
         }
 
-        // Use the full cache name (including ":ttl=") as cache identity,
-        // so different TTLs create separate caches even if base name matches.
+        // Use full name (incl ":ttl=") so different TTLs become different caches.
         return new CaffeineCache(name, builder.build());
     }
 
