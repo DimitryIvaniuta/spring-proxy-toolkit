@@ -22,10 +22,10 @@ public class CacheConfig {
     @Bean
     public CacheManager cacheManager() {
         // Base builder. Actual TTL can be overridden per cache by ":ttl=NN" suffix.
-        return new TtlCaffeineCacheManager(
+        return new TtlCaffeineCacheManager(() ->
                 Caffeine.newBuilder()
                         .maximumSize(50_000)
-                        .expireAfterAccess(Duration.ofMinutes(10))
+                        .expireAfterAccess(Duration.ofMinutes(10)) // base fallback (if :ttl= not provided)
                         .recordStats()
         );
     }
