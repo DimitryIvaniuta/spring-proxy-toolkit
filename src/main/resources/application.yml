@@ -35,7 +35,8 @@ management:
   metrics:
     tags:
       application: ${spring.application.name}
-
+    export:
+      enabled: true
 # matches @ConfigurationProperties(prefix="proxy-toolkit")
 proxy-toolkit:
   enabled: true
