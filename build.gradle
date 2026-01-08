@@ -61,6 +61,8 @@ dependencies {
     // integration tests with PostgreSQL containers
     testImplementation 'org.testcontainers:junit-jupiter'
     testImplementation 'org.testcontainers:postgresql'
+
+    testRuntimeOnly "io.micrometer:micrometer-registry-prometheus"
 }
 
 tasks.withType(Test).configureEach {
