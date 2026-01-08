@@ -1,0 +1,19 @@
+management:
+  endpoints:
+    web:
+      base-path: /actuator
+      exposure:
+        include: health,info,metrics,prometheus
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+# IMPORTANT: keep the servlet path/root consistent for MockMvc
+spring:
+  mvc:
+    servlet:
+      path: /
+server:
+  servlet:
+    context-path: ""
