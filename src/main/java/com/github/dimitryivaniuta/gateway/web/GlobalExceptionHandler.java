@@ -1,6 +1,5 @@
 package com.github.dimitryivaniuta.gateway.web;
 
-
 import com.github.dimitryivaniuta.gateway.proxy.ratelimit.RateLimitExceededException;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
@@ -57,6 +56,15 @@ public class GlobalExceptionHandler {
                 .body(error(HttpStatus.INTERNAL_SERVER_ERROR, "Unexpected error", req));
     }
 
+    @ExceptionHandler(org.springframework.web.servlet.resource.NoResourceFoundException.class)
+    public ResponseEntity<ApiError> noResource(
+            org.springframework.web.servlet.resource.NoResourceFoundException ex,
+            HttpServletRequest request
+    ) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(error(HttpStatus.NOT_FOUND, ex.getMessage(), request));
+    }
+
     private ApiError error(HttpStatus status, String message, HttpServletRequest req) {
         return new ApiError(
                 Instant.now(),
@@ -67,4 +75,6 @@ public class GlobalExceptionHandler {
                 MDC.get(CORRELATION_ID_MDC_KEY)
         );
     }
+
+
 }
